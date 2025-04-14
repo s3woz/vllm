@@ -1054,8 +1054,11 @@ class GraniteMoeHybridForCausalLM(nn.Module, HasInnerState, SupportsLoRA, Suppor
                 **kwargs):
         if self.mamba_cache is None:
 
-            num_mamba_layers = self.model_config.get_num_layers_by_block_type(
-                self.vllm_config.parallel_config, LayerBlockType.mamba)
+            # STW: HF code from Friday returns 40, HF code from Monday returns 0. Should be 36.
+            #num_mamba_layers = self.model_config.get_num_layers_by_block_type(
+            #            self.vllm_config.parallel_config, LayerBlockType.mamba)
+            # STW: This works properly:
+            num_mamba_layers = len(list(filter(lambda x: x == "mamba2", self.model_config.hf_config.layer_types)))
 
             self.mamba_cache = MambaCacheManager(
                 self.vllm_config, self.model_config.dtype, num_mamba_layers,
