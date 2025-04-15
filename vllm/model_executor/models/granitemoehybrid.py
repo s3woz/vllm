@@ -160,12 +160,15 @@ class GraniteMoeHybridMixerDecoderLayer(nn.Module):
         sequence_idx: Optional[torch.Tensor] = None,
         **kwargs,
     ):
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
+        # Bamba logic:
+        # if residual is None:
+        #     residual = hidden_states
+        #     hidden_states = self.input_layernorm(hidden_states)
+        # else:
+        #     hidden_states, residual = self.input_layernorm(
+        #         hidden_states, residual)
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
 
         hidden_states = self.self_attn(hidden_states, mamba_cache_params,
                                    sequence_idx)
@@ -721,6 +724,66 @@ ALL_DECODER_LAYER_TYPES = {
     "mamba2": GraniteMoeHybridMixerDecoderLayer,
 }
 
+# class GraniteMoeHybridRotaryEmbedding(nn.Module):
+#     def __init__(self, config: GraniteMoeHybridConfig, device=None):
+#         super().__init__()
+#         # BC: "rope_type" was originally "type"
+#         if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
+#             self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
+#         else:
+#             self.rope_type = "default"
+#         self.max_seq_len_cached = config.max_position_embeddings
+#         self.original_max_seq_len = config.max_position_embeddings
+
+#         self.config = config
+#         self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+
+#         inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
+#         self.register_buffer("inv_freq", inv_freq, persistent=False)
+#         self.original_inv_freq = self.inv_freq
+
+#     def _dynamic_frequency_update(self, position_ids, device):
+#         """
+#         dynamic RoPE layers should recompute `inv_freq` in the following situations:
+#         1 - growing beyond the cached sequence length (allow scaling)
+#         2 - the current sequence length is in the original scale (avoid losing precision with small sequences)
+#         """
+#         seq_len = torch.max(position_ids) + 1
+#         if seq_len > self.max_seq_len_cached:  # growth
+#             inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device, seq_len=seq_len)
+#             self.register_buffer("inv_freq", inv_freq, persistent=False)  # TODO joao: may break with compilation
+#             self.max_seq_len_cached = seq_len
+
+#         if seq_len < self.original_max_seq_len and self.max_seq_len_cached > self.original_max_seq_len:  # reset
+#             # This .to() is needed if the model has been moved to a device after being initialized (because
+#             # the buffer is automatically moved, but not the original copy)
+#             self.original_inv_freq = self.original_inv_freq.to(device)
+#             self.register_buffer("inv_freq", self.original_inv_freq, persistent=False)
+#             self.max_seq_len_cached = self.original_max_seq_len
+
+#     @torch.no_grad()
+#     def forward(self, x, position_ids):
+#         if "dynamic" in self.rope_type:
+#             self._dynamic_frequency_update(position_ids, device=x.device)
+
+#         # Core RoPE block
+#         inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+#         position_ids_expanded = position_ids[:, None, :].float()
+#         # Force float32 (see https://github.com/huggingface/transformers/pull/29285)
+#         device_type = x.device.type
+#         device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
+#         with torch.autocast(device_type=device_type, enabled=False):
+#             freqs = (inv_freq_expanded.float().to(x.device) @ position_ids_expanded.float()).transpose(1, 2)
+#             emb = torch.cat((freqs, freqs), dim=-1)
+#             cos = emb.cos()
+#             sin = emb.sin()
+
+#         # Advanced RoPE types (e.g. yarn) apply a post-processing scaling factor, equivalent to scaling attention
+#         cos = cos * self.attention_scaling
+#         sin = sin * self.attention_scaling
+
+#         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+
 
 class GraniteMoeHybridModel(nn.Module):
 
@@ -743,6 +806,8 @@ class GraniteMoeHybridModel(nn.Module):
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
         )
+        self.embedding_multiplier = config.embedding_multiplier
+        #self.rotary_emb = GraniteMoeHybridRotaryEmbedding(config)
 
         def get_layer(prefix: str):
             layer_idx = int(prefix.rsplit(".", 1)[1])
@@ -797,6 +862,7 @@ class GraniteMoeHybridModel(nn.Module):
                 hidden_states = inputs_embeds
             else:
                 hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = hidden_states * self.embedding_multiplier
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -805,6 +871,7 @@ class GraniteMoeHybridModel(nn.Module):
 
         residual = None
         num_attn = 0
+        # D_layer = 0
         for i in range(len(self.layers)):
             layer = self.layers[i]
             if isinstance(layer, GraniteMoeHybridDecoderLayer):
@@ -823,12 +890,18 @@ class GraniteMoeHybridModel(nn.Module):
                 sequence_idx=seq_idx,
             )
 
+            # print(D_layer, hidden_states.abs().sum())
+            # D_layer += 1
+
+
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
                 "residual": residual
             })
-        hidden_states, _ = self.norm(hidden_states, residual)
+        # Bamba
+        #hidden_states, _ = self.norm(hidden_states, residual)
+        hidden_states = self.norm(hidden_states)
         return hidden_states
 
     def load_weights(self, weights: Iterable[Tuple[str,
