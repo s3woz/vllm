@@ -25,7 +25,7 @@ HYBRID_MODELS = [
     "ai21labs/Jamba-tiny-dev",
     # NOTE: ibm-research/granite-4.0-tiny-test are skipped currently as
     # the HF model URLs not available yet
-    "ibm-research/granite-4.0-tiny-test",
+    # "ibm-research/granite-4.0-tiny-test",
     # NOTE: Running Plamo2 in transformers implementation requires to install
     # causal-conv1d package, which is not listed as a test dependency as it's
     # not compatible with pip-compile.
@@ -49,9 +49,6 @@ def test_models(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    if model == "ibm-research/granite-4.0-tiny-test":
-        pytest.skip(reason="HF model URLs not available yet")
-    
     with hf_runner(model) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
@@ -78,9 +75,6 @@ def test_batching(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    if model == "ibm-research/granite-4.0-tiny-test":
-        pytest.skip(reason="HF model URLs not available yet")
-    
     for_loop_outputs = []
     with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
         for prompt in example_prompts:
@@ -112,9 +106,6 @@ def test_chunked_prefill(
     num_logprobs: int,
     chunked_prefill_token_size: int,
 ) -> None:
-    if model == "ibm-research/granite-4.0-tiny-test":
-        pytest.skip(reason="HF model URLs not available yet")
-        
     max_num_seqs = chunked_prefill_token_size
     max_num_batched_tokens = chunked_prefill_token_size
 
@@ -157,9 +148,6 @@ def test_chunked_prefill_with_parallel_sampling(
     decoding steps inside a chunked prefill forward pass
     (where we have both prefill and decode together)
     """
-    if model == "ibm-research/granite-4.0-tiny-test":
-        pytest.skip(reason="HF model URLs not available yet")
-    
     sampling_params = SamplingParams(n=3,
                                      temperature=1,
                                      seed=0,
@@ -187,9 +175,6 @@ def test_mamba_cache_cg_padding(
     batch size. If it's not, a torch RuntimeError will be raised because
     tensor dimensions aren't compatible.
     """
-    if model == "ibm-research/granite-4.0-tiny-test":
-        pytest.skip(reason="HF model URLs not available yet")
-    
     vllm_config = EngineArgs(model=model,
                              trust_remote_code=True).create_engine_config()
     while len(example_prompts) == vllm_config.pad_for_cudagraph(
@@ -217,9 +202,6 @@ def test_models_preemption_recompute(
     """
     Tests that outputs are identical with and w/o preemptions (recompute).
     """
-    if model == "ibm-research/granite-4.0-tiny-test":
-        pytest.skip(reason="HF model URLs not available yet")
-    
     with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
         scheduler = vllm_model.model.llm_engine.scheduler[0]
         scheduler.ENABLE_ARTIFICIAL_PREEMPT = True
@@ -252,9 +234,6 @@ def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
     statelessness mechanism where it can cleanup new incoming requests in
     a single step.
     """
-    if model == "ibm-research/granite-4.0-tiny-test":
-        pytest.skip(reason="HF model URLs not available yet")
-    
     try:
         with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
             vllm_model.generate_greedy([example_prompts[0]] * 100, 10)
@@ -275,9 +254,6 @@ def test_state_cleanup(
     
     If its not cleaned, an error would be expected.
     """
-    if model == "ibm-research/granite-4.0-tiny-test":
-        pytest.skip(reason="HF model URLs not available yet")
-    
     try:
         with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
             for _ in range(10):
@@ -295,9 +271,6 @@ def test_multistep_correctness(
     model: str,
     max_tokens: int,
 ) -> None:
-    if model == "ibm-research/granite-4.0-tiny-test":
-        pytest.skip(reason="HF model URLs not available yet")
-    
     with vllm_runner(model, num_scheduler_steps=8,
                      max_num_seqs=2) as vllm_model:
         vllm_outputs_multistep = vllm_model.generate_greedy(
@@ -325,9 +298,6 @@ def test_hybrid_distributed_produces_identical_generation(
     model: str,
     max_tokens: int,
 ) -> None:
-    if model == "ibm-research/granite-4.0-tiny-test":
-        pytest.skip(reason="HF model URLs not available yet")
-    
     with vllm_runner(model, tensor_parallel_size=2,
                      max_num_seqs=2) as vllm_model:
         vllm_outputs_tp_2 = vllm_model.generate_greedy(example_prompts,
