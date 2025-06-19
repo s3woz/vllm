@@ -67,7 +67,7 @@ def test_chunk_scan_combined():
     ## Dimensions
     # Denoted (B, T, Q, D, P) in the paper
     # batch, seqlen, chunk_size, dim, headdim = 1, 16, 4, 8, 4
-    batch, seqlen, chunk_size, dim, headdim = 2, 16, 4, 8, 4
+    batch, seqlen, chunk_size, dim, headdim = 3, 16, 4, 8, 4
     nheads = dim // headdim  # (H) in the paper
     ngroups = 1 # (G) in the paper
     dstate = 4  # (N) in the paper
@@ -109,17 +109,11 @@ def test_chunk_scan_combined():
                
                
     # This variable indicates for each batch to which sequence a token belongs to. I.e., for a single batch and a single sequence this would be [0, 0, 0, 0, ...]
-    # [item for sublist in l for item in sublist]
     seq_idx = torch.tensor([[idx] * seqlen for idx in range(batch)]).to(device=device, dtype=torch.int32)
     # This variable indicates for a flattened tensor of tokens, what the chunk sizes are. They may be the same (somewhat default case), but they may also be different, i.e., across batch boundaries
-    # chunk_indices = torch.tensor([idx for _ in range(batch) for idx in range(n_chunks_split)]).to(device=device, dtype=torch.int32)
-    chunk_indices = torch.tensor([idx for idx in range(2 * n_chunks_split)]).to(device=device, dtype=torch.int32)
+    chunk_indices = torch.tensor([idx for idx in range(batch * n_chunks_split)]).to(device=device, dtype=torch.int32)
     # This variable indicates where the individual chunks start at
-    # chunk_offset = torch.tensor([idx * chunk_size for _ in range(batch) for idx in range(n_chunks_split)]).to(device=device, dtype=torch.int32)
-    chunk_offset = (torch.zeros(2 * (n_chunks - skip_chunks), device=device, dtype=torch.int32))
-
-    # chunk_indices = (torch.tensor([0, 1, 2, 3, 4, 5])).to(device=device, dtype=torch.int32)
-    # chunk_offset = (torch.tensor([0, 0, 0, 0, 0, 0])).to(device=device, dtype=torch.int32)
+    chunk_offset = (torch.zeros(batch * (n_chunks - skip_chunks), device=device, dtype=torch.int32))
 
     # Split off some chunks
     x_split, dt_split, A_split, B_split, C_split, D_split, seq_idx_split = split_off_prefilled_parts(x, dt, A, B, C, D, seq_idx, skip_chunks = skip_chunks)
@@ -146,7 +140,8 @@ def test_chunk_scan_combined():
     if batch > 1:
         x_split_vllm, dt_split_vllm, B_split_vllm, C_split_vllm, seq_idx_split_vllm, states_passed_ref_vllm = to_vllm_shapes(x_split, dt_split, B_split, C_split, seq_idx_split, states_passed_ref[:, skip_chunks, :])
         # x_split_vllm, seq_idx_split_vllm = create_vllm_input(x_split, dt_split, A, B_split, C_split, D=None, seq_idx=seq_idx_split)
-        cu_seqlens_vllm = torch.tensor([0, (n_chunks - skip_chunks) * chunk_size, 2 * ((n_chunks - skip_chunks) * chunk_size)], dtype=torch.int32, device=device)
+        # cu_seqlens_vllm = torch.tensor([0, (n_chunks - skip_chunks) * chunk_size, 2 * ((n_chunks - skip_chunks) * chunk_size)], dtype=torch.int32, device=device)
+        cu_seqlens_vllm = torch.tensor([el * (n_chunks - skip_chunks) * chunk_size for el in range(batch + 1, )], dtype=torch.int32, device=device)
         out_vllm_split_state_passed, _ = ssd_vllm(x_split_vllm,
                                                dt_split_vllm,
                                                A,
