@@ -223,7 +223,7 @@ def mamba_chunk_scan_combined(x,
         dt_softplus=dt_softplus,
         dt_limit=dt_limit)
     if not return_varlen_states:
-        return out if not return_final_states else (out, final_states)
+        return (out, states) if not return_final_states else (out, final_states)
     else:
         varlen_states = rest[0]
         return (out,
