@@ -374,6 +374,10 @@ class GraniteMoeHybridModel(nn.Module):
         else:
             # v1 get mamba2_metadata from forward_context
             mamba2_metadata = None
+        
+        # TODO: Cleanup. Debugging:
+        # if mamba2_metadata.chunk_indices is not None and torch.equal(mamba2_metadata.chunk_indices, torch.tensor([0, 1, 1, 2, 3, 4, 5, 6, 7], device='cuda:0', dtype=torch.int32)):
+        #     print('Chunk indices look weird!')
 
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:

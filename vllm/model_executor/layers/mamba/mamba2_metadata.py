@@ -109,6 +109,13 @@ def prepare_mamba2_metadata(
                 _query_start_loc_to_chunk_indices_offsets(
                 query_start_loc, chunk_size, num_prefill_tokens)
 
+            # TODO: Cleanup. Debugging:
+            # if chunk_indices is not None and torch.equal(chunk_indices, torch.tensor([0, 1, 1, 2, 3, 4, 5, 6, 7], device='cuda:0', dtype=torch.int32)):
+            #     print('Chunk indices look weird!')
+
+            # if chunk_indices is not None:
+            #     print('Chunk indices are normal!')
+
     if mamba2_metadata is not None:
         mamba2_metadata.has_initial_states = has_initial_states
         mamba2_metadata.prep_initial_states = prep_initial_states

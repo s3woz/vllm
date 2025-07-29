@@ -623,6 +623,10 @@ class MambaMixer2(MambaBase, CustomOp):
                         has_initial_states_p[:num_prefills, None, None, None],
                         ssm_state[state_indices_tensor_p], 0)
 
+            # TODO: Cleanup. Debugging:
+            # if initial_states is not None:
+            #     print('Initial states used!')
+
             scan_output, varlen_state = mamba_chunk_scan_combined(
                 hidden_states_p.view(1, num_prefill_tokens,
                                      self.num_heads // self.tp_size,
@@ -634,6 +638,9 @@ class MambaMixer2(MambaBase, CustomOp):
                 C_p.view(1, num_prefill_tokens, self.n_groups // self.tp_size,
                          -1),
                 chunk_size=chunk_size,
+                # TODO: Cleanup. Debugging:
+                # chunk_size=256,
+                # chunk_size=128,
                 D=self.D,
                 z=None,
                 dt_bias=self.dt_bias,

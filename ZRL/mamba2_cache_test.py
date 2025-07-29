@@ -55,7 +55,7 @@ def test_selective_state_update_with_heads(dim, dstate, ngroups, has_z, tie_hdim
     assert torch.allclose(state, state_ref, rtol=rtol, atol=atol)
     assert torch.allclose(out, out_vllm, rtol=rtol, atol=atol)
     
-# Simple test
+# Test for mamba2 state update without conv-1D
 def test_chunk_scan_combined():
     torch.manual_seed(42)
     itype = torch.float16
@@ -159,6 +159,8 @@ def test_chunk_scan_combined():
         assert torch.allclose(out[:, skip_chunks*chunk_size:, :], out_vllm_split_state_passed_mamba, rtol=rtol, atol=atol), "Prefix computing WITH initial states failed with the vLLM implementation failed!"
     
     print('All checks passed!')
+    
+# TODO: Test for entire mamba2 including conv-1D
     
 # test_selective_state_update_with_heads(dim=2048, dstate=16, ngroups=1, has_z=True, tie_hdim=True, itype=torch.float16)
 test_chunk_scan_combined()
