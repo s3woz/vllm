@@ -61,6 +61,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         supports_dynamo)
 from vllm.v1.attention.backends.flash_attn import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
     create_fast_prefill_custom_backend,
@@ -1124,6 +1125,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
+        last_metadata = None  # naive cache to avoid recomputing across groups
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
             encoder_seq_lens = self._get_encoder_seq_lens(
@@ -1216,10 +1218,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             attn_metadata[ubid][layer_name] = attn_metadata_i
                 else:
                     assert isinstance(attn_metadata, dict)
-                    attn_metadata_i = builder.build(
-                        common_prefix_len=common_prefix_len,
-                        common_attn_metadata=common_attn_metadata,
-                        **extra_attn_metadata_args)
+                    if isinstance(builder, Mamba2AttentionMetadataBuilder):
+                        extra_attn_metadata_args = dict(
+                            last_metadata=last_metadata)
+                        attn_metadata_i = builder.build(
+                            common_prefix_len=common_prefix_len,
+                            common_attn_metadata=common_attn_metadata,
+                            **extra_attn_metadata_args)
+                        last_metadata = attn_metadata_i
+                    else:
+                        attn_metadata_i = builder.build(
+                            common_prefix_len=common_prefix_len,
+                            common_attn_metadata=common_attn_metadata,
+                            **extra_attn_metadata_args)
                     for layer_name in attn_group.layer_names:
                         attn_metadata[layer_name] = attn_metadata_i
 
