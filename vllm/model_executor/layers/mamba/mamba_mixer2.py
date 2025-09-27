@@ -838,12 +838,10 @@ class MambaMixer2(MambaBase, CustomOp):
                       device=last_chunk_p.device), last_chunk_p + 1])[seq_idx] \
                        + chunk_stride - 1 \
                        - last_computed_token_block_offset[seq_idx] // chunk_size
-                    # first_aligned_chunk = torch.concat([torch.zeros(1, dtype=last_chunk_p.dtype, device=last_chunk_p.device), last_chunk_p + 1])[seq_idx] + chunk_stride - 1 - last_computed_token_block_offset[seq_idx] // chunk_size
                     from_where = states[
                         0, first_aligned_chunk:first_aligned_chunk +
                         n_blocks_to_fill[seq_idx] * chunk_stride:chunk_stride]
                     ssm_state_orig[cache_blocks_to_fill] = from_where
-                    # ssm_state[cache_blocks_to_fill] = from_where
                     
                     try:
                         torch.testing.assert_close(ssm_state_orig[cache_blocks_to_fill], ssm_state[cache_blocks_to_fill])
@@ -854,10 +852,6 @@ class MambaMixer2(MambaBase, CustomOp):
                 ssm_state_orig[state_indices_tensor_p.gather(1,
                         current_last_idx_p.unsqueeze(1)).squeeze(1)] = \
                     states[0, last_chunk_p]
-                    
-                # ssm_state[state_indices_tensor_p.gather(1,
-                #         current_last_idx_p.unsqueeze(1)).squeeze(1)] = \
-                #     states[0, last_chunk_p]
                     
                 try:
                     torch.testing.assert_close(ssm_state_orig[state_indices_tensor_p.gather(1, current_last_idx_p.unsqueeze(1)).squeeze(1)],
@@ -870,7 +864,6 @@ class MambaMixer2(MambaBase, CustomOp):
                 # update ssm states
                 # - varlen state is (num_prefills, nheads, headdim, dstate)
                 ssm_state_orig[state_indices_tensor_p] = varlen_state
-                # ssm_state = torch.clone(ssm_state_orig)
                 ssm_state[state_indices_tensor_p] = varlen_state
 
 
