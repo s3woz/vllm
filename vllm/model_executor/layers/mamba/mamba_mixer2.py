@@ -33,6 +33,8 @@ from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     selective_state_update)
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined)
+from vllm.model_executor.layers.mamba.ops.ssd_combined_orig import (
+    mamba_chunk_scan_combined as mamba_chunk_scan_combined_orig)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import (
     LoaderFunction, composed_weight_loader, sharded_weight_loader)
@@ -721,7 +723,7 @@ class MambaMixer2(MambaBase, CustomOp):
 
             # 3. State Space Model sequence transformation
             initial_states = None
-
+            initial_states_orig = None
             if (has_initial_states_p is not None and prep_initial_states):
                 # making a copy of the states
                 if envs.VLLM_USE_V1:
@@ -737,7 +739,11 @@ class MambaMixer2(MambaBase, CustomOp):
                         has_initial_states_p[:, None, None, None],
                         ssm_state[state_indices_tensor_p], 0)
 
-            # NOTE: final output is an in-place update of out tensor
+                initial_states_orig = torch.clone(initial_states)
+                
+            ssm_state_orig = torch.clone(ssm_state)
+
+            # # NOTE: final output is an in-place update of out tensor
             mamba_outputs = mamba_chunk_scan_combined(
                 hidden_states_p.view(1, num_prefill_tokens,
                                      self.num_heads // self.tp_size,
@@ -759,6 +765,13 @@ class MambaMixer2(MambaBase, CustomOp):
                 cu_chunk_seqlens=cu_chunk_seqlen_p,
                 last_chunk=last_chunk_p,
                 initial_states=initial_states,
+                ssm_state=ssm_state,
+                state_indices_tensor=state_indices_tensor_p,
+                state_indices_stride=stride_state_indices,
+                chunk_stride = mamba_block_size // chunk_size,
+                n_blocks_to_fill_tensor=n_blocks_to_fill,
+                current_first_idx_tensor=current_first_idx_p,
+                last_computed_token_block_offset_tensor=attn_metadata.last_computed_token_block_offset,
                 return_intermediate_states=cache_enabled,
                 return_varlen_states=True,
                 return_final_states=False,
@@ -767,9 +780,39 @@ class MambaMixer2(MambaBase, CustomOp):
                 out=preallocated_ssm_out_p.view(1, num_prefill_tokens, -1,
                                                 self.head_dim),
                 state_dtype=ssm_state.dtype)
+            
+            mamba_outputs_orig = mamba_chunk_scan_combined_orig(
+                hidden_states_p.view(1, num_prefill_tokens,
+                                     self.num_heads // self.tp_size,
+                                     self.head_dim),
+                dt_p.unsqueeze(0),
+                self.A,
+                B_p.view(1, num_prefill_tokens, self.n_groups // self.tp_size,
+                         -1),
+                C_p.view(1, num_prefill_tokens, self.n_groups // self.tp_size,
+                         -1),
+                chunk_size=chunk_size,
+                D=self.D,
+                z=None,
+                dt_bias=self.dt_bias,
+                seq_idx=seq_idx_p,
+                chunk_indices=chunk_indices_p,
+                chunk_offsets=chunk_offsets_p,
+                cu_seqlens=query_start_loc_p,
+                cu_chunk_seqlens=cu_chunk_seqlen_p,
+                last_chunk=last_chunk_p,
+                initial_states=initial_states_orig,
+                return_intermediate_states=cache_enabled,
+                return_varlen_states=True,
+                return_final_states=False,
+                dt_softplus=True,
+                dt_limit=(0.0, float("inf")),
+                out=preallocated_ssm_out_p.view(1, num_prefill_tokens, -1,
+                                                self.head_dim),
+                state_dtype=ssm_state_orig.dtype)
 
             if cache_enabled:
-                states, _ = mamba_outputs
+                states, _ = mamba_outputs_orig
                 n_blocks_to_fill = current_last_idx_p - current_first_idx_p
                 # Save states for sequences with more than just the final state:
                 for seq_idx in (n_blocks_to_fill > 0).nonzero().squeeze(1):
@@ -795,20 +838,41 @@ class MambaMixer2(MambaBase, CustomOp):
                       device=last_chunk_p.device), last_chunk_p + 1])[seq_idx] \
                        + chunk_stride - 1 \
                        - last_computed_token_block_offset[seq_idx] // chunk_size
+                    # first_aligned_chunk = torch.concat([torch.zeros(1, dtype=last_chunk_p.dtype, device=last_chunk_p.device), last_chunk_p + 1])[seq_idx] + chunk_stride - 1 - last_computed_token_block_offset[seq_idx] // chunk_size
                     from_where = states[
                         0, first_aligned_chunk:first_aligned_chunk +
                         n_blocks_to_fill[seq_idx] * chunk_stride:chunk_stride]
-                    ssm_state[cache_blocks_to_fill] = from_where
+                    ssm_state_orig[cache_blocks_to_fill] = from_where
+                    # ssm_state[cache_blocks_to_fill] = from_where
+                    
+                    try:
+                        torch.testing.assert_close(ssm_state_orig[cache_blocks_to_fill], ssm_state[cache_blocks_to_fill])
+                    except:
+                        print('Test failed!')
 
                 #For all seqs, store the last state (Note: might be partial):
-                ssm_state[state_indices_tensor_p.gather(1,
+                ssm_state_orig[state_indices_tensor_p.gather(1,
                         current_last_idx_p.unsqueeze(1)).squeeze(1)] = \
                     states[0, last_chunk_p]
+                    
+                # ssm_state[state_indices_tensor_p.gather(1,
+                #         current_last_idx_p.unsqueeze(1)).squeeze(1)] = \
+                #     states[0, last_chunk_p]
+                    
+                try:
+                    torch.testing.assert_close(ssm_state_orig[state_indices_tensor_p.gather(1, current_last_idx_p.unsqueeze(1)).squeeze(1)],
+                                               ssm_state[state_indices_tensor_p.gather(1, current_last_idx_p.unsqueeze(1)).squeeze(1)])
+                except:
+                    print('Test failed!')
+                    
             else:
                 varlen_state = mamba_outputs
                 # update ssm states
                 # - varlen state is (num_prefills, nheads, headdim, dstate)
+                ssm_state_orig[state_indices_tensor_p] = varlen_state
+                # ssm_state = torch.clone(ssm_state_orig)
                 ssm_state[state_indices_tensor_p] = varlen_state
+
 
         # Process decode requests
         if has_decode:

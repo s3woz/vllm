@@ -14,7 +14,7 @@ from vllm.triton_utils import triton
 
 from .ssd_bmm import _bmm_chunk_fwd
 from .ssd_chunk_scan import _chunk_scan_fwd
-from .ssd_chunk_state import _chunk_cumsum_fwd, _chunk_state_fwd
+from .ssd_chunk_state import _chunk_cumsum_fwd, _chunk_state_fwd, _state_cache_fwd
 from .ssd_state_passing import _state_passing_fwd
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
@@ -34,6 +34,14 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    z=None,
                                    dt_bias=None,
                                    initial_states=None,
+                                   ssm_state=None,
+                                   state_indices_tensor=None,
+                                   state_indices_stride=None,
+                                   chunk_stride=None,
+                                   n_blocks_to_fill_tensor=None,
+                                   current_first_idx_tensor=None,
+                                #    current_last_idx_tensor=None,
+                                   last_computed_token_block_offset_tensor=None,
                                    seq_idx=None,
                                    chunk_indices=None,
                                    chunk_offsets=None,
@@ -74,8 +82,10 @@ def _mamba_chunk_scan_combined_fwd(x,
         if cu_seqlens is None:
             assert initial_states.shape == (batch, nheads, headdim, dstate)
         else:
-            assert initial_states.shape == (len(cu_seqlens) - 1, nheads,
-                                            headdim, dstate)
+            # assert initial_states.shape == (len(cu_seqlens) - 1, nheads,
+            #                                 headdim, dstate)
+            pass
+            # TODO: adjust assertion to new interface
 
     # This function executes 5 sub-functions for computing mamba
     # - a good resource is the blog https://goombalab.github.io/blog/2024/mamba2-part3-algorithm/
@@ -117,6 +127,9 @@ def _mamba_chunk_scan_combined_fwd(x,
     # - this will ensure that states will be updated with the rightmost flushed seq_idx
     #   of the previous chunk. This implies that the first chunk of states is either 0
     #   or equal to init_states of the first example.
+    if initial_states is not None:
+        print('Here')
+    
     states = _state_passing_fwd(
         rearrange(states, "... p n -> ... (p n)"),
         dA_cumsum,
@@ -129,6 +142,20 @@ def _mamba_chunk_scan_combined_fwd(x,
         is_cont_batched=cu_seqlens is not None,
         chunk_offsets=chunk_offsets)
     states = rearrange(states, "... (p n) -> ... p n", n=dstate)
+    
+    # 3.1 store the computed states
+    if current_first_idx_tensor is not None:
+        _state_cache_fwd(states=states,
+                         cache_state=ssm_state,
+                         cu_seqlens=cu_seqlens,
+                         state_indices_tensor=state_indices_tensor,
+                         state_indices_stride=state_indices_stride,
+                         chunk_stride=chunk_stride,
+                         n_blocks_to_fill_tensor=n_blocks_to_fill_tensor,
+                         current_first_idx_tensor=current_first_idx_tensor,
+                         last_computed_token_block_offset_tensor=last_computed_token_block_offset_tensor,
+                         last_chunk=last_chunk,
+                         chunk_size=chunk_size)
 
     # 4. Compute batched matrix multiply for C_j^T B_i terms
     CB = _bmm_chunk_fwd(C,
@@ -166,11 +193,11 @@ def _mamba_chunk_scan_combined_fwd(x,
     )
     final_states = states[:, -1, ...]
     if cu_seqlens is None:
-        return out_x, dt, dA_cumsum, states, final_states
+        return out_x, dt, dA_cumsum, states, final_states, ssm_state
     else:
         assert batch == 1, "passing cu_seqlens to get the varlen states is only supported if batch dimension is 1"
         varlen_states = states[:, last_chunk, ...].clone().squeeze(0)
-        return out_x, dt, dA_cumsum, states, final_states, varlen_states
+        return out_x, dt, dA_cumsum, states, final_states, varlen_states, ssm_state
 
 
 def mamba_chunk_scan_combined(x,
@@ -183,6 +210,14 @@ def mamba_chunk_scan_combined(x,
                               z=None,
                               dt_bias=None,
                               initial_states=None,
+                              ssm_state=None,
+                              state_indices_tensor=None,
+                              state_indices_stride=None,
+                              chunk_stride=None,
+                              n_blocks_to_fill_tensor=None,
+                              current_first_idx_tensor=None,
+                            #   current_last_idx_tensor=None,
+                              last_computed_token_block_offset_tensor=None,
                               seq_idx=None,
                               chunk_indices=None,
                               chunk_offsets=None,
@@ -231,6 +266,14 @@ def mamba_chunk_scan_combined(x,
         z=z,
         dt_bias=dt_bias,
         initial_states=initial_states,
+        ssm_state=ssm_state,
+        state_indices_tensor=state_indices_tensor,
+        state_indices_stride=state_indices_stride,
+        chunk_stride=chunk_stride,
+        n_blocks_to_fill_tensor=n_blocks_to_fill_tensor,
+        current_first_idx_tensor=current_first_idx_tensor,
+        # current_last_idx_tensor=current_last_idx_tensor,
+        last_computed_token_block_offset_tensor=last_computed_token_block_offset_tensor,
         seq_idx=seq_idx,
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
