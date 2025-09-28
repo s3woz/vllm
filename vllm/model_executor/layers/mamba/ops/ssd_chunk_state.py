@@ -770,8 +770,6 @@ def _state_cache_fwd_kernel(
     headdim: tl.constexpr,
     headdim_pw2: tl.constexpr,
     dstate: tl.constexpr,
-    dstate_pw2: tl.constexpr,
-    ndim1: tl.constexpr,
     nseq: tl.constexpr,
     # Strides
     state_indices_stride: tl.constexpr,
@@ -856,12 +854,99 @@ def _state_cache_fwd_kernel(
     
     tl.debug_barrier()  #  NOTE: use this due to bug in Triton compiler
     tl.store(current_cache_state_ptr, state_at_seq_block, mask)
+    
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_SIZE_N': 2}),
+        triton.Config({'BLOCK_SIZE_N': 4}),
+        triton.Config({'BLOCK_SIZE_N': 8}),
+        triton.Config({'BLOCK_SIZE_N': 16}),
+        triton.Config({'BLOCK_SIZE_N': 32}),
+        triton.Config({'BLOCK_SIZE_N': 64}),
+    ],
+    key=['nheads', 'dstate', 'headdim'],
+)
+@triton.jit
+def _init_state_fwd_kernel(
+    # Pointers to matrices
+    ssm_state_ptr,
+    init_states_ptr,
+    state_indices_ptr,
+    last_state_idx_ptr,
+    has_initial_states_ptr,
+    # Matrix dimensions
+    nheads: tl.constexpr,
+    nheads_pw2: tl.constexpr,
+    headdim: tl.constexpr,
+    headdim_pw2: tl.constexpr,
+    dstate: tl.constexpr,
+    # Strides
+    state_indices_stride: tl.constexpr,
+    state_chunk_stride: tl.constexpr,
+    state_nheads_stride: tl.constexpr,
+    state_headdim_stride: tl.constexpr,
+    state_dstate_stride: tl.constexpr,
+    cache_state_cacheline_stride: tl.constexpr,
+    cache_state_nheads_stride: tl.constexpr,
+    cache_state_headdim_stride: tl.constexpr,
+    cache_state_dstate_stride: tl.constexpr,
+    # Meta-parameters
+    IS_CACHE_ENABLED: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    ):
+    
+    # single-sequence id
+    idx_seq = tl.program_id(0)
+    
+    pid_n = tl.program_id(1)
+    
+    # elements along the number of heads
+    idx_nheads = tl.arange(0, nheads_pw2)
+    
+    # elements along the head dimension
+    idx_headdim = tl.arange(0, headdim_pw2)
+    
+    # elements along the state dimension
+    idx_dstate = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    
+    has_initial_states = tl.load(has_initial_states_ptr + idx_seq).to(tl.int32)
+    
+    ssm_state_offset = tl.load(state_indices_ptr + idx_seq).to(tl.int64)
+    if IS_CACHE_ENABLED:
+        idx_last_chunk = tl.load(last_state_idx_ptr + idx_seq).to(tl.int64)
+        ssm_state_offset = tl.load(state_indices_ptr +
+                                  idx_seq * state_indices_stride + 
+                                  idx_last_chunk
+                                 ).to(tl.int64)
+             
+    state_at_seq_block_ptr = ssm_state_ptr + \
+                             ssm_state_offset * state_chunk_stride + \
+                             (idx_nheads * state_nheads_stride)[:, None, None] + \
+                             (idx_headdim * state_headdim_stride)[None, :, None] + \
+                             (idx_dstate * state_dstate_stride)[None, None, :]
+    mask_load = (has_initial_states > 0) & \
+                (idx_nheads < nheads)[:, None, None] & \
+                (idx_headdim < headdim)[None, :, None] & \
+                (idx_dstate < dstate)[None, None, :]
+    state_at_seq_block = tl.load(state_at_seq_block_ptr, mask_load, 0.0)
+    
+    mask_store = (idx_nheads < nheads)[:, None, None] & \
+                 (idx_headdim < headdim)[None, :, None] & \
+                 (idx_dstate < dstate)[None, None, :]
+    current_init_states_ptr = init_states_ptr + \
+                              idx_seq * cache_state_cacheline_stride + \
+                              (idx_nheads * cache_state_nheads_stride)[:, None, None] + \
+                              (idx_headdim * cache_state_headdim_stride)[None, :, None] + \
+                              (idx_dstate * cache_state_dstate_stride)[None, None, :]
+    
+    tl.debug_barrier()  #  NOTE: use this due to bug in Triton compiler
+    tl.store(current_init_states_ptr, state_at_seq_block, mask_store)
 
 def _state_cache_fwd(states=None,
                      cache_state=None,
                      cu_seqlens=None,
+                     cu_chunk_seqlens=None,
                      state_indices_tensor=None,
-                     state_indices_stride=None,
                      chunk_stride=None,
                      n_blocks_to_fill_tensor=None,
                      current_first_idx_tensor=None,
@@ -873,10 +958,7 @@ def _state_cache_fwd(states=None,
     nseq = cu_seqlens.shape[0] - 1 # Actually is number of sequences in the "batch"
     n_blocks_to_fill_max = max(n_blocks_to_fill_tensor).item()
     
-    try:
-        assert nchunks - nseq == sum(n_blocks_to_fill_tensor * chunk_stride)
-    except:
-        print('Check failed!')
+    assert nchunks == (cu_chunk_seqlens.shape[0] - 1)
     
     grid = lambda META: (nseq * (n_blocks_to_fill_max + 1), # The +1 is for the last state that is always stored
                          triton.cdiv(dstate, META['BLOCK_SIZE_N'])
@@ -897,10 +979,8 @@ def _state_cache_fwd(states=None,
             headdim,
             triton.next_power_of_2(headdim),
             dstate,
-            triton.next_power_of_2(dstate),
-            nseq * (n_blocks_to_fill_max + 1),
             nseq,
-            state_indices_stride,
+            state_indices_tensor.stride(0),
             chunk_stride,
             states.stride(1),
             states.stride(2),
@@ -911,3 +991,49 @@ def _state_cache_fwd(states=None,
             cache_state.stride(2),
             cache_state.stride(3),
         )
+        
+def _init_state_fwd(ssm_state=None,
+                    init_states=None,
+                    cu_seqlens=None,
+                    state_indices_tensor=None,
+                    last_state_idx_tensor=None,
+                    has_initial_states_tensor=None,
+                    ):
+    
+    _, nheads, headdim, dstate = ssm_state.shape
+    nseq = cu_seqlens.shape[0] - 1 # Actually is number of sequences in the "batch"
+    
+    # try:
+    #     # assert nchunks == sum(triton.cdiv((cu_seqlens[1:] - cu_seqlens[:-1]), chunk_size))
+    #     assert nchunks == (cu_chunk_seqlens.shape[0] - 1)
+    # except:
+    #     print('Check failed!')
+    
+    grid = lambda META: (nseq, # The +1 is for the last state that is always stored
+                         triton.cdiv(dstate, META['BLOCK_SIZE_N'])
+    )
+    
+    with torch.cuda.device(init_states.device.index):
+        _init_state_fwd_kernel[grid](
+            ssm_state,
+            init_states,
+            state_indices_tensor,
+            last_state_idx_tensor,
+            has_initial_states_tensor,
+            nheads,
+            triton.next_power_of_2(nheads),
+            headdim,
+            triton.next_power_of_2(headdim),
+            dstate,
+            state_indices_tensor.stride(0),
+            ssm_state.stride(0),
+            ssm_state.stride(1),
+            ssm_state.stride(2),
+            ssm_state.stride(3),
+            init_states.stride(0),
+            init_states.stride(1),
+            init_states.stride(2),
+            init_states.stride(3),
+            IS_CACHE_ENABLED=last_state_idx_tensor is not None,
+        )
+    print('Here')

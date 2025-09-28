@@ -14,7 +14,7 @@ from vllm.triton_utils import triton
 
 from .ssd_bmm import _bmm_chunk_fwd
 from .ssd_chunk_scan import _chunk_scan_fwd
-from .ssd_chunk_state import _chunk_cumsum_fwd, _chunk_state_fwd, _state_cache_fwd
+from .ssd_chunk_state import _chunk_cumsum_fwd, _chunk_state_fwd, _state_cache_fwd, _init_state_fwd
 from .ssd_state_passing import _state_passing_fwd
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
@@ -33,14 +33,14 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    D=None,
                                    z=None,
                                    dt_bias=None,
-                                   initial_states=None,
                                    ssm_state=None,
                                    state_indices_tensor=None,
-                                   state_indices_stride=None,
                                    chunk_stride=None,
                                    n_blocks_to_fill_tensor=None,
                                    current_first_idx_tensor=None,
-                                #    current_last_idx_tensor=None,
+                                   last_state_idx_tensor=None,
+                                   has_initial_states_tensor=None,
+                                   prep_initial_states=None,
                                    last_computed_token_block_offset_tensor=None,
                                    seq_idx=None,
                                    chunk_indices=None,
@@ -78,15 +78,7 @@ def _mamba_chunk_scan_combined_fwd(x,
         z = z.contiguous()
     if D is not None and D.stride(-1) != 1:
         D = D.contiguous()
-    if initial_states is not None:
-        if cu_seqlens is None:
-            assert initial_states.shape == (batch, nheads, headdim, dstate)
-        else:
-            # assert initial_states.shape == (len(cu_seqlens) - 1, nheads,
-            #                                 headdim, dstate)
-            pass
-            # TODO: adjust assertion to new interface
-
+    
     # This function executes 5 sub-functions for computing mamba
     # - a good resource is the blog https://goombalab.github.io/blog/2024/mamba2-part3-algorithm/
     #   which has a minimal implementation to understand the below operations
@@ -127,8 +119,16 @@ def _mamba_chunk_scan_combined_fwd(x,
     # - this will ensure that states will be updated with the rightmost flushed seq_idx
     #   of the previous chunk. This implies that the first chunk of states is either 0
     #   or equal to init_states of the first example.
-    if initial_states is not None:
-        print('Here')
+    initial_states = None
+    
+    if has_initial_states_tensor is not None and prep_initial_states:
+        initial_states = torch.empty_like(ssm_state[:(len(cu_seqlens) - 1), :])
+        _init_state_fwd(ssm_state=ssm_state,
+                        init_states=initial_states,
+                        cu_seqlens=cu_seqlens,
+                        state_indices_tensor=state_indices_tensor,
+                        last_state_idx_tensor=last_state_idx_tensor,
+                        has_initial_states_tensor=has_initial_states_tensor)
     
     states = _state_passing_fwd(
         rearrange(states, "... p n -> ... (p n)"),
@@ -141,6 +141,7 @@ def _mamba_chunk_scan_combined_fwd(x,
         out_dtype=state_dtype if state_dtype is not None else C.dtype,
         is_cont_batched=cu_seqlens is not None,
         chunk_offsets=chunk_offsets)
+
     states = rearrange(states, "... (p n) -> ... p n", n=dstate)
     
     # 3.1 store the computed states
@@ -148,8 +149,8 @@ def _mamba_chunk_scan_combined_fwd(x,
         _state_cache_fwd(states=states,
                          cache_state=ssm_state,
                          cu_seqlens=cu_seqlens,
+                         cu_chunk_seqlens=cu_chunk_seqlens,
                          state_indices_tensor=state_indices_tensor,
-                         state_indices_stride=state_indices_stride,
                          chunk_stride=chunk_stride,
                          n_blocks_to_fill_tensor=n_blocks_to_fill_tensor,
                          current_first_idx_tensor=current_first_idx_tensor,
@@ -209,14 +210,14 @@ def mamba_chunk_scan_combined(x,
                               D=None,
                               z=None,
                               dt_bias=None,
-                              initial_states=None,
                               ssm_state=None,
                               state_indices_tensor=None,
-                              state_indices_stride=None,
                               chunk_stride=None,
                               n_blocks_to_fill_tensor=None,
                               current_first_idx_tensor=None,
-                            #   current_last_idx_tensor=None,
+                              last_state_idx_tensor=None,
+                              has_initial_states_tensor=None,
+                              prep_initial_states=None,
                               last_computed_token_block_offset_tensor=None,
                               seq_idx=None,
                               chunk_indices=None,
@@ -265,14 +266,14 @@ def mamba_chunk_scan_combined(x,
         D=D,
         z=z,
         dt_bias=dt_bias,
-        initial_states=initial_states,
         ssm_state=ssm_state,
         state_indices_tensor=state_indices_tensor,
-        state_indices_stride=state_indices_stride,
         chunk_stride=chunk_stride,
         n_blocks_to_fill_tensor=n_blocks_to_fill_tensor,
         current_first_idx_tensor=current_first_idx_tensor,
-        # current_last_idx_tensor=current_last_idx_tensor,
+        last_state_idx_tensor=last_state_idx_tensor,
+        has_initial_states_tensor=has_initial_states_tensor,
+        prep_initial_states=prep_initial_states,
         last_computed_token_block_offset_tensor=last_computed_token_block_offset_tensor,
         seq_idx=seq_idx,
         chunk_indices=chunk_indices,
