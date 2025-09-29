@@ -33,8 +33,6 @@ from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     selective_state_update)
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined)
-from vllm.model_executor.layers.mamba.ops.ssd_combined_orig import (
-    mamba_chunk_scan_combined as mamba_chunk_scan_combined_orig)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import (
     LoaderFunction, composed_weight_loader, sharded_weight_loader)
