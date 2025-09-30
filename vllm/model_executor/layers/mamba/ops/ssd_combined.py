@@ -33,7 +33,6 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    D=None,
                                    z=None,
                                    dt_bias=None,
-                                   initial_states=None,
                                    ssm_state=None,
                                    state_indices_tensor=None,
                                    chunk_stride=None,
@@ -120,16 +119,16 @@ def _mamba_chunk_scan_combined_fwd(x,
     # - this will ensure that states will be updated with the rightmost flushed seq_idx
     #   of the previous chunk. This implies that the first chunk of states is either 0
     #   or equal to init_states of the first example.
-    # initial_states = None
+    initial_states = None
     
-    # if has_initial_states_tensor is not None and prep_initial_states:
-    #     initial_states = torch.empty_like(ssm_state[:(len(cu_seqlens) - 1), :])
-    #     _init_state_fwd(ssm_state=ssm_state,
-    #                     init_states=initial_states,
-    #                     cu_seqlens=cu_seqlens,
-    #                     state_indices_tensor=state_indices_tensor,
-    #                     last_state_idx_tensor=last_state_idx_tensor,
-    #                     has_initial_states_tensor=has_initial_states_tensor)
+    if has_initial_states_tensor is not None and prep_initial_states:
+        initial_states = torch.empty_like(ssm_state[:(len(cu_seqlens) - 1), :])
+        _init_state_fwd(ssm_state=ssm_state,
+                        init_states=initial_states,
+                        cu_seqlens=cu_seqlens,
+                        state_indices_tensor=state_indices_tensor,
+                        last_state_idx_tensor=last_state_idx_tensor,
+                        has_initial_states_tensor=has_initial_states_tensor)
     
     states = _state_passing_fwd(
         rearrange(states, "... p n -> ... (p n)"),
@@ -146,9 +145,6 @@ def _mamba_chunk_scan_combined_fwd(x,
     states = rearrange(states, "... (p n) -> ... p n", n=dstate)
     
     # 3.1 store the computed states
-    # if current_first_idx_tensor is not None:
-    # print('Errro!!!!!!')
-    
     _state_cache_fwd(states=states,
                     cache_state=ssm_state,
                     cu_seqlens=cu_seqlens,
@@ -200,7 +196,7 @@ def _mamba_chunk_scan_combined_fwd(x,
         return out_x, dt, dA_cumsum, states, final_states, ssm_state
     else:
         assert batch == 1, "passing cu_seqlens to get the varlen states is only supported if batch dimension is 1"
-        varlen_states = states[:, last_chunk, ...].clone().squeeze(0)
+        varlen_states = states[:, last_chunk, ...].squeeze(0)
         return out_x, dt, dA_cumsum, states, final_states, varlen_states, ssm_state
 
 
@@ -214,7 +210,6 @@ def mamba_chunk_scan_combined(x,
                               z=None,
                               dt_bias=None,
                               ssm_state=None,
-                              initial_states=None,
                               state_indices_tensor=None,
                               chunk_stride=None,
                               n_blocks_to_fill_tensor=None,
@@ -271,7 +266,6 @@ def mamba_chunk_scan_combined(x,
         z=z,
         dt_bias=dt_bias,
         ssm_state=ssm_state,
-        initial_states=initial_states,
         state_indices_tensor=state_indices_tensor,
         chunk_stride=chunk_stride,
         n_blocks_to_fill_tensor=n_blocks_to_fill_tensor,
