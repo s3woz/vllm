@@ -744,14 +744,122 @@ def chunk_state_varlen(B,
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE_N': 2}),
-        triton.Config({'BLOCK_SIZE_N': 4}),
-        triton.Config({'BLOCK_SIZE_N': 8}),
-        triton.Config({'BLOCK_SIZE_N': 16}),
-        triton.Config({'BLOCK_SIZE_N': 32}),
-        triton.Config({'BLOCK_SIZE_N': 64}),
+        triton.Config({
+            'BLOCK_SIZE_M': 4,
+            'BLOCK_SIZE_N': 8
+            },
+            num_stages=8,
+            num_warps=16),
+        triton.Config({
+            'BLOCK_SIZE_M': 8,
+            'BLOCK_SIZE_N': 8
+            },
+            num_stages=8,
+            num_warps=16),
+        triton.Config({
+            'BLOCK_SIZE_M': 16,
+            'BLOCK_SIZE_N': 8
+            },
+            num_stages=8,
+            num_warps=16),
+        triton.Config({
+            'BLOCK_SIZE_M': 32,
+            'BLOCK_SIZE_N': 8
+            },
+            num_stages=8,
+            num_warps=16),
+        triton.Config({
+            'BLOCK_SIZE_M': 64,
+            'BLOCK_SIZE_N': 8
+            },
+            num_stages=8,
+            num_warps=16),
+        triton.Config({
+            'BLOCK_SIZE_M': 4,
+            'BLOCK_SIZE_N': 16
+            },
+            num_stages=8,
+            num_warps=16),
+        triton.Config({
+            'BLOCK_SIZE_M': 8,
+            'BLOCK_SIZE_N': 16
+            },
+            num_stages=8,
+            num_warps=16),
+        triton.Config({
+            'BLOCK_SIZE_M': 16,
+            'BLOCK_SIZE_N': 16
+            },
+            num_stages=8,
+            num_warps=16),
+        triton.Config({
+            'BLOCK_SIZE_M': 32,
+            'BLOCK_SIZE_N': 16
+            },
+            num_stages=8,
+            num_warps=16),
+        triton.Config({
+            'BLOCK_SIZE_M': 64,
+            'BLOCK_SIZE_N': 16
+            },
+            num_stages=8,
+            num_warps=16),
+        triton.Config({
+            'BLOCK_SIZE_M': 8,
+            'BLOCK_SIZE_N': 32
+            },
+            num_stages=8,
+            num_warps=16),
+        triton.Config({
+            'BLOCK_SIZE_M': 16,
+            'BLOCK_SIZE_N': 32
+            },
+            num_stages=8,
+            num_warps=16),
+        triton.Config({
+            'BLOCK_SIZE_M': 32,
+            'BLOCK_SIZE_N': 32
+            },
+            num_stages=8,
+            num_warps=16),
+        triton.Config({
+            'BLOCK_SIZE_M': 64,
+            'BLOCK_SIZE_N': 32
+            },
+            num_stages=8,
+            num_warps=16),
+        triton.Config({
+            'BLOCK_SIZE_M': 4,
+            'BLOCK_SIZE_N': 64
+            },
+            num_stages=8,
+            num_warps=16),
+        triton.Config({
+            'BLOCK_SIZE_M': 8,
+            'BLOCK_SIZE_N': 64
+            },
+            num_stages=8,
+            num_warps=16),
+        triton.Config({
+            'BLOCK_SIZE_M': 16,
+            'BLOCK_SIZE_N': 64
+            },
+            num_stages=8,
+            num_warps=16),
+        triton.Config({
+            'BLOCK_SIZE_M': 32,
+            'BLOCK_SIZE_N': 64
+            },
+            num_stages=8,
+            num_warps=16),
+        triton.Config({
+            'BLOCK_SIZE_M': 64,
+            'BLOCK_SIZE_N': 64
+            },
+            num_stages=8,
+            num_warps=16),
     ],
-    key=['nheads', 'dstate', 'headdim'],
+    key=['dstate', 'headdim'],
 )
 @triton.jit
 def _state_cache_fwd_kernel(
@@ -770,6 +878,7 @@ def _state_cache_fwd_kernel(
     headdim: tl.constexpr,
     headdim_pw2: tl.constexpr,
     dstate: tl.constexpr,
+    dstate_pw2: tl.constexpr,
     nseq: tl.constexpr,
     # Strides
     state_indices_stride: tl.constexpr,
@@ -783,25 +892,31 @@ def _state_cache_fwd_kernel(
     cache_state_headdim_stride: tl.constexpr,
     cache_state_dstate_stride: tl.constexpr,
     # Meta-parameters
+    BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     ):
     
     # single-sequence id
     idx_seq = tl.program_id(0) % nseq
     idx_block_to_fill = tl.program_id(0) // nseq
+    # idx_seq = tl.program_id(0)
+    # idx_block_to_fill = tl.program_id(1)
     
     # index for block to fill. If larger than the number of blocks to fill for the current sequence, return
     n_blocks_to_fill = tl.load(n_blocks_to_fill_ptr + idx_seq)
     
-    pid_n = tl.program_id(1)
+    pid_m = tl.program_id(1)
+    pid_n = tl.program_id(2)
     
     # elements along the number of heads
     idx_nheads = tl.arange(0, nheads_pw2)
     
     # elements along the head dimension
-    idx_headdim = tl.arange(0, headdim_pw2)
+    # idx_headdim = tl.arange(0, headdim_pw2)
+    idx_headdim = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     
     # elements along the state dimension
+    # idx_dstate = tl.arange(0, dstate_pw2)
     idx_dstate = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     
     idx_last_chunk = tl.load(last_chunk_ptr + idx_seq).to(tl.int64)
@@ -960,11 +1075,17 @@ def _state_cache_fwd(states=None,
     
     assert nchunks == (cu_chunk_seqlens.shape[0] - 1)
     
+    # grid = lambda META: (nseq * (n_blocks_to_fill_max + 1), # The +1 is for the last state that is always stored
+    #                      triton.cdiv(dstate, META['BLOCK_SIZE_N'])
+    #                     )
     grid = lambda META: (nseq * (n_blocks_to_fill_max + 1), # The +1 is for the last state that is always stored
-                         triton.cdiv(dstate, META['BLOCK_SIZE_N'])
+                         triton.cdiv(headdim, META['BLOCK_SIZE_M']),
+                         triton.cdiv(dstate, META['BLOCK_SIZE_N']),
                         )
+    # grid = lambda META: (nseq * (n_blocks_to_fill_max + 1), # The +1 is for the last state that is always stored
+    #                     )
     
-    with torch.cuda.device(cache_state.device.index):
+    with torch.cuda.device(states.device.index):
         _state_cache_fwd_kernel[grid](
             states,
             cache_state,
@@ -979,6 +1100,7 @@ def _state_cache_fwd(states=None,
             headdim,
             triton.next_power_of_2(headdim),
             dstate,
+            triton.next_power_of_2(dstate),
             nseq,
             state_indices_tensor.stride(0),
             chunk_stride,
@@ -1002,12 +1124,6 @@ def _init_state_fwd(ssm_state=None,
     
     _, nheads, headdim, dstate = ssm_state.shape
     nseq = cu_seqlens.shape[0] - 1 # Actually is number of sequences in the "batch"
-    
-    # try:
-    #     # assert nchunks == sum(triton.cdiv((cu_seqlens[1:] - cu_seqlens[:-1]), chunk_size))
-    #     assert nchunks == (cu_chunk_seqlens.shape[0] - 1)
-    # except:
-    #     print('Check failed!')
     
     grid = lambda META: (nseq, # The +1 is for the last state that is always stored
                          triton.cdiv(dstate, META['BLOCK_SIZE_N'])
@@ -1036,4 +1152,3 @@ def _init_state_fwd(ssm_state=None,
             init_states.stride(3),
             IS_CACHE_ENABLED=last_state_idx_tensor is not None,
         )
-    print('Here')

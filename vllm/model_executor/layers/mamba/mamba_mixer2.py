@@ -33,8 +33,6 @@ from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     selective_state_update)
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined)
-from vllm.model_executor.layers.mamba.ops.ssd_combined_orig import (
-    mamba_chunk_scan_combined as mamba_chunk_scan_combined_orig)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import (
     LoaderFunction, composed_weight_loader, sharded_weight_loader)
@@ -44,8 +42,9 @@ from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 
-# Added by the IBM Team, 2024
-
+# # Added by the IBM Team, 2024
+from torch.profiler import profile, ProfilerActivity, record_function
+import os
 
 # Adapted from transformers.models.mamba2.modeling_mamba2.MambaRMSNormGated
 @CustomOp.register("mixer2_gated_rms_norm")
@@ -691,13 +690,18 @@ class MambaMixer2(MambaBase, CustomOp):
             if cache_enabled:
                 n_blocks_to_fill = current_last_idx_p - current_first_idx_p
                 stride_state_indices = state_indices_tensor_p.shape[-1]
+                last_computed_token_block_offset_tensor = attn_metadata.last_computed_token_block_offset
             else:
-                current_first_idx_p = None
+                current_first_idx_p = torch.zeros_like(state_indices_tensor_p)
                 current_last_idx_p = None
                 seq_lens_completed_p = None
                 last_state_idx_p = None
-                n_blocks_to_fill = None
+                # n_blocks_to_fill = None
+                # n_blocks_to_fill = torch.zeros_like(state_indices_tensor_p)
+                n_blocks_to_fill = current_first_idx_p
                 stride_state_indices = 1
+                # last_computed_token_block_offset_tensor = torch.zeros_like(state_indices_tensor_p)
+                last_computed_token_block_offset_tensor = current_first_idx_p
 
             hidden_states_B_C_p = causal_conv1d_fn(
                 x,
@@ -722,51 +726,76 @@ class MambaMixer2(MambaBase, CustomOp):
                 hidden_states_B_C_p)
 
             # 3. State Space Model sequence transformation
-            # NOTE: final output is an in-place update of out tensor
-            mamba_outputs = mamba_chunk_scan_combined(
-                hidden_states_p.view(1, num_prefill_tokens,
-                                     self.num_heads // self.tp_size,
-                                     self.head_dim),
-                dt_p.unsqueeze(0),
-                self.A,
-                B_p.view(1, num_prefill_tokens, self.n_groups // self.tp_size,
-                         -1),
-                C_p.view(1, num_prefill_tokens, self.n_groups // self.tp_size,
-                         -1),
-                chunk_size=chunk_size,
-                D=self.D,
-                z=None,
-                dt_bias=self.dt_bias,
-                seq_idx=seq_idx_p,
-                chunk_indices=chunk_indices_p,
-                chunk_offsets=chunk_offsets_p,
-                cu_seqlens=query_start_loc_p,
-                cu_chunk_seqlens=cu_chunk_seqlen_p,
-                last_chunk=last_chunk_p,
-                ssm_state=ssm_state,
-                state_indices_tensor=state_indices_tensor_p,
-                chunk_stride = mamba_block_size // chunk_size,
-                n_blocks_to_fill_tensor=n_blocks_to_fill,
-                current_first_idx_tensor=current_first_idx_p,
-                last_state_idx_tensor=last_state_idx_p,
-                has_initial_states_tensor=has_initial_states_p,
-                prep_initial_states=prep_initial_states,
-                last_computed_token_block_offset_tensor=attn_metadata.last_computed_token_block_offset,
-                return_intermediate_states=cache_enabled,
-                return_varlen_states=True,
-                return_final_states=False,
-                dt_softplus=True,
-                dt_limit=(0.0, float("inf")),
-                out=preallocated_ssm_out_p.view(1, num_prefill_tokens, -1,
-                                                self.head_dim),
-                state_dtype=ssm_state.dtype)
-            
-            if not cache_enabled:
-                varlen_state = mamba_outputs
-                # update ssm states
-                # - varlen state is (num_prefills, nheads, headdim, dstate)
-                ssm_state[state_indices_tensor_p] = varlen_state
+            initial_states = None
 
+            if (has_initial_states_p is not None and prep_initial_states):
+                # making a copy of the states
+                if envs.VLLM_USE_V1:
+                    kernel_ssm_indices = state_indices_tensor_p
+                    if cache_enabled:
+                        kernel_ssm_indices = state_indices_tensor_p.gather(
+                            1, last_state_idx_p.unsqueeze(1)).squeeze(1)
+                    initial_states = torch.where(
+                        has_initial_states_p[:, None, None, None],
+                        ssm_state[kernel_ssm_indices], 0)
+                else:
+                    initial_states = torch.where(
+                        has_initial_states_p[:, None, None, None],
+                        ssm_state[state_indices_tensor_p], 0)
+                    
+            # NOTE: final output is an in-place update of out tensor
+            with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True, profile_memory=True) as prof:
+                mamba_outputs = mamba_chunk_scan_combined(
+                    hidden_states_p.view(1, num_prefill_tokens,
+                                        self.num_heads // self.tp_size,
+                                        self.head_dim),
+                    dt_p.unsqueeze(0),
+                    self.A,
+                    B_p.view(1, num_prefill_tokens, self.n_groups // self.tp_size,
+                            -1),
+                    C_p.view(1, num_prefill_tokens, self.n_groups // self.tp_size,
+                            -1),
+                    chunk_size=chunk_size,
+                    D=self.D,
+                    z=None,
+                    dt_bias=self.dt_bias,
+                    seq_idx=seq_idx_p,
+                    chunk_indices=chunk_indices_p,
+                    chunk_offsets=chunk_offsets_p,
+                    cu_seqlens=query_start_loc_p,
+                    initial_states=initial_states,
+                    cu_chunk_seqlens=cu_chunk_seqlen_p,
+                    last_chunk=last_chunk_p,
+                    ssm_state=ssm_state,
+                    state_indices_tensor=state_indices_tensor_p,
+                    chunk_stride = mamba_block_size // chunk_size,
+                    n_blocks_to_fill_tensor=n_blocks_to_fill,
+                    current_first_idx_tensor=current_first_idx_p,
+                    last_state_idx_tensor=last_state_idx_p,
+                    has_initial_states_tensor=has_initial_states_p,
+                    prep_initial_states=prep_initial_states,
+                    last_computed_token_block_offset_tensor=last_computed_token_block_offset_tensor,
+                    return_intermediate_states=cache_enabled,
+                    return_varlen_states=True,
+                    return_final_states=False,
+                    dt_softplus=True,
+                    dt_limit=(0.0, float("inf")),
+                    out=preallocated_ssm_out_p.view(1, num_prefill_tokens, -1,
+                                                    self.head_dim),
+                    state_dtype=ssm_state.dtype)
+            
+            # if not cache_enabled:
+            #     varlen_state = mamba_outputs
+            #     # update ssm states
+            #     # - varlen state is (num_prefills, nheads, headdim, dstate)
+            #     ssm_state[state_indices_tensor_p] = varlen_state
+
+            if has_prefill and not has_decode:
+                name = f"Trace_cache_enabled_{cache_enabled}"
+                ind = 0
+                while os.path.exists(os.path.join('/block/granite/vllm20250909/traces_ssm_benchmark', f'{name}_{ind}_new.json')):
+                    ind += 1
+                prof.export_chrome_trace(os.path.join('/block/granite/vllm20250909/traces_ssm_benchmark', f'{name}_{ind}_new.json'))
 
         # Process decode requests
         if has_decode:
